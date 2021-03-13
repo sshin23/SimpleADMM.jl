@@ -1,0 +1,13 @@
+name = "SimpleADMM"
+uuid = "12438b49-b34a-4b7b-98de-0209cc7abbd4"
+authors = ["Sungho Shin"]
+version = "0.1.0"
+
+[deps]
+SimpleNLModels = "f0d6f1f6-17c6-46e2-b3a9-6ef89a8ca0c6"
+LightGraphs = "093fc24a-ae57-5d10-9952-331d41423f4d"
+Metis = "2679e427-3c69-5b7f-982b-ece356f1e94b"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+
+[compat]
+julia = "1"
