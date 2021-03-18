@@ -73,8 +73,6 @@ mutable struct SubModel
         x_sub = view(msub.x,length(V_inner)+1:length(V_inner)+length(V_bdry))
         l_sub = view(msub.p,1+length(V_bdry):2*length(V_bdry))
 
-        m[:z_counter][V_bdry] .+= 1
-
         return new(msub, x_V_orig, x_V_sub, z_orig, z_sub, x_sub, l_sub)
     end
 end
@@ -85,12 +83,6 @@ mutable struct ADMMModel
     rho::Float64
 end
 
-
-function instantiate!(admm::ADMMModel)
-    Threads.@threads for sm in admm.submodels
-        instantiate!(sm)
-    end
-end
 function iterate!(admm::ADMMModel;
                   err_pr=Threads.Atomic{Float64}(Inf),
                   err_du=Threads.Atomic{Float64}(Inf))
@@ -155,9 +147,14 @@ function ADMMModel(m::Model;rho=1.,opt...)
     m[:z_counter] = zeros(Int,num_variables(m))
     
     sms = Vector{SubModel}(undef,length(m[:Vs]))
-    
-    Threads.@threads for i in collect(keys(m[:Vs]))
-        sms[i] = SubModel(m,sort!(m[:Vs][i]),rho;opt...)
+
+    K = [k for k in keys(m[:Vs])]
+    Threads.@threads for k in K
+        sms[k] = SubModel(m,m[:Vs][k],rho;opt...)
+    end
+
+    for k in K
+        m[:z_counter][sms[k].z_orig.indices[1]] .+= 1
     end
     
     ADMMModel(m,sms,rho)
