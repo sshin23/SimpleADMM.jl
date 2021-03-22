@@ -12,6 +12,8 @@ mutable struct SubModel
 
     x_V_orig
     x_V_sub
+    l_V_orig
+    l_V_sub
     
     z_orig    
     z_sub
@@ -36,6 +38,7 @@ mutable struct SubModel
         sort!(V_bdry)
 
         V_inner = setdiff(V,V_bdry)
+        V_con = [i for i in 1:num_constraints(m) if examine(V_bool,keys(deriv(m.cons[i]))) >= 1]
         
         x = Dict{Int,Expression}()
         z = Dict{Int,Expression}()
@@ -55,8 +58,8 @@ mutable struct SubModel
         for obj in m.objs
             examine(V_bool,keys(deriv(obj))) >= 2 && objective(msub,func(obj)(x,m.p))
         end
-        for i in eachindex(m.cons)
-            examine(V_bool,keys(deriv(m.cons[i]))) >= 1 && constraint(msub,func(m.cons[i])(x,m.p);lb=m.gl[i],ub=m.gu[i])
+        for i in V_con
+             constraint(msub,func(m.cons[i])(x,m.p);lb=m.gl[i],ub=m.gu[i])
         end
         for i in V_bdry
             objective(msub, (x[i]-z[i]) * l[i])
@@ -67,13 +70,15 @@ mutable struct SubModel
 
         x_V_orig = view(m.x,V)
         x_V_sub = view(msub.x,([index(x[i]) for i in V]))
+        l_V_orig = view(m.l,V_con)
+        l_V_sub = msub.l
 
         z_orig = view(m[:z],V_bdry)
         z_sub = view(msub.p,1:length(V_bdry)) 
         x_sub = view(msub.x,length(V_inner)+1:length(V_inner)+length(V_bdry))
         l_sub = view(msub.p,1+length(V_bdry):2*length(V_bdry))
 
-        return new(msub, x_V_orig, x_V_sub, z_orig, z_sub, x_sub, l_sub)
+        return new(msub, x_V_orig, x_V_sub, l_V_orig, l_V_sub, z_orig, z_sub, x_sub, l_sub)
     end
 end
 
@@ -94,7 +99,10 @@ function iterate!(admm::ADMMModel;
         sm.x_V_orig .= sm.x_V_sub
         Threads.atomic_max!(err_pr,difference(sm.x_sub,sm.z_sub))
     end
-    
+    admm.model.l.=0
+    for sm in admm.submodels
+        sm.l_V_orig .+= sm.l_V_sub
+    end
     admm.model[:z] .= 0
     for sm in admm.submodels
         sm.z_orig .+= sm.x_sub + sm.l_sub ./ 2 ./ admm.rho
