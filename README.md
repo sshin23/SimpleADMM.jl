@@ -1,2 +1,1 @@
-# SchwarzNLP.jl
-Schwarz NLP solver
+# SimpleADMM.jl
