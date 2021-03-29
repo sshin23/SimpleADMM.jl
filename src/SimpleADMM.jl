@@ -1,11 +1,19 @@
 module SimpleADMM
 
 import Printf: @sprintf
-import LightGraphs: Graph, add_edge!, neighbors, nv
-import SimpleNLModels: Expression, Model, variable, parameter, constraint, objective,
-    num_variables, num_constraints, func, deriv, optimize!, instantiate!, index
+import SimpleNL: Expression, Model, variable, parameter, constraint, objective, num_variables, num_constraints, optimize!, instantiate!, index, get_terms, get_entries_expr, sparsity, non_caching_eval, KKTErrorEvaluator
+import Requires: @require
 
-export ADMMModel, iterate!, optimize!
+default_subproblem_optimizer() = @isdefined(DEFAULT_SUBPROBLEM_OPTIMIZER) ? DEFAULT_SUBPROBLEM_OPTIMIZER : error("DEFAULT_SUBPROBLEM_OPTIMIZER is not defined. To use Ipopt as a default subproblem optimizer, do: using Ipopt")
+default_option() = Dict(
+    :rho=>1.,
+    :maxiter=>400,
+    :tol=>1e-6,
+    :subproblem_optimizer=>default_subproblem_optimizer(),
+    :subproblem_option=>Dict(:print_level=>0),
+    :save_output=>false,
+    :optional=>admm->nothing
+)
 
 mutable struct SubModel
     model::Model
@@ -20,16 +28,16 @@ mutable struct SubModel
     x_sub
     l_sub
 
-    function SubModel(m::Model,V,rho;opt...)
-        msub = Model(m.optimizer;m.opt...,opt...)
+    function SubModel(m::Model,optimizer,V,rho,
+                      objs,cons,obj_sparsity,con_sparsity;opt...)
+        msub = Model(optimizer;opt...)
 
         V_bdry = Int[]
 
         V_bool = falses(num_variables(m))
         V_bool[V] .= true
         
-        for i in 1:num_constraints(m)
-            vs = keys(deriv(m.cons[i]))
+        for vs in con_sparsity
             if examine(V_bool,vs) == 1
                 union!(V_bdry,vs)
             end
@@ -38,7 +46,7 @@ mutable struct SubModel
         sort!(V_bdry)
 
         V_inner = setdiff(V,V_bdry)
-        V_con = [i for i in 1:num_constraints(m) if examine(V_bool,keys(deriv(m.cons[i]))) >= 1]
+        V_con = [i for i in eachindex(con_sparsity) if examine(V_bool,con_sparsity[i]) >= 1]
         
         x = Dict{Int,Expression}()
         z = Dict{Int,Expression}()
@@ -53,23 +61,17 @@ mutable struct SubModel
         end
         for i in V_bdry
             l[i]= parameter(msub)
+        end        
+        for i in V_con
+             constraint(msub,non_caching_eval(cons[i],x,m.p);lb=m.gl[i],ub=m.gu[i])
         end
         
-        for obj in m.objs
-            examine(V_bool,keys(deriv(obj))) >= 2 && objective(msub,func(obj)(x,m.p))
-        end
-        for i in V_con
-             constraint(msub,func(m.cons[i])(x,m.p);lb=m.gl[i],ub=m.gu[i])
-        end
-        for i in V_bdry
-            objective(msub, (x[i]-z[i]) * l[i])
-            objective(msub, 0.5 * rho * (x[i]-z[i])^2)
-        end
+        objective(msub,sum(non_caching_eval(objs[i],x,m.p) for i in eachindex(objs) if examine(V_bool,obj_sparsity[i]) >= 2) + sum((x[i]-z[i]) * l[i] + 0.5 * rho * (x[i]-z[i])^2 for i in V_bdry))
                 
         instantiate!(msub)
 
         x_V_orig = view(m.x,V)
-        x_V_sub = view(msub.x,([index(x[i]) for i in V]))
+        x_V_sub = view(msub.x,([x[i].index for i in V]))
         l_V_orig = view(m.l,V_con)
         l_V_sub = msub.l
 
@@ -82,32 +84,11 @@ mutable struct SubModel
     end
 end
 
-mutable struct ADMMModel
+mutable struct Optimizer
     model::Model
     submodels::Vector{SubModel}
-    rho::Float64
-end
-
-function iterate!(admm::ADMMModel;
-                  err_pr=Threads.Atomic{Float64}(Inf),
-                  err_du=Threads.Atomic{Float64}(Inf))
-    Threads.@threads for sm in admm.submodels
-        Threads.atomic_max!(err_du,admm.rho * difference(sm.z_orig,sm.z_sub))
-        sm.z_sub .= sm.z_orig
-        sm.l_sub .+= admm.rho .* (sm.x_sub .- sm.z_sub)
-        optimize!(sm)
-        sm.x_V_orig .= sm.x_V_sub
-        Threads.atomic_max!(err_pr,difference(sm.x_sub,sm.z_sub))
-    end
-    admm.model.l.=0
-    for sm in admm.submodels
-        sm.l_V_orig .+= sm.l_V_sub
-    end
-    admm.model[:z] .= 0
-    for sm in admm.submodels
-        sm.z_orig .+= sm.x_sub + sm.l_sub ./ 2 ./ admm.rho
-    end
-    primal_update!(admm.model[:z],admm.model[:z_counter])    
+    kkt_error_evaluator
+    opt::Dict{Symbol,Any}
 end
 
 function primal_update!(z,z_counter)
@@ -116,18 +97,35 @@ function primal_update!(z,z_counter)
     end
 end
 
-function optimize!(admm::ADMMModel;tol = 1e-8, maxiter = 100, optional = (admm)->nothing)
-    err_pr=Threads.Atomic{Float64}(Inf)
-    err_du=Threads.Atomic{Float64}(Inf)
+function optimize!(admm::Optimizer)
+    save_output = admm.opt[:save_output]
+    if save_output
+        output = Tuple{Float64,Float64}[]
+        start = time()
+    end
 
     iter = 0
-    while max(err_pr[],err_du[]) > tol && iter < maxiter
-        err_pr[] = .0
-        err_du[] = .0
-        iterate!(admm;err_pr=err_pr,err_du=err_du)
-        println(@sprintf "%4i %4.2e %4.2e" iter+=1 err_pr[] err_du[])
-        optional(admm)
+    while (err=admm.kkt_error_evaluator(admm.model.x,admm.model.l,admm.model.gl)) > admm.opt[:tol] && iter < admm.opt[:maxiter]
+        Threads.@threads for sm in admm.submodels
+            sm.z_sub .= sm.z_orig
+            sm.l_sub .+= admm.opt[:rho] .* (sm.x_sub .- sm.z_sub)
+            optimize!(sm)
+            sm.x_V_orig .= sm.x_V_sub
+        end
+        admm.model.l.=0
+        for sm in admm.submodels
+            sm.l_V_orig .+= sm.l_V_sub
+        end
+        admm.model[:z] .= 0
+        for sm in admm.submodels
+            sm.z_orig .+= sm.x_sub + sm.l_sub ./ 2 ./ admm.opt[:rho]
+        end
+        primal_update!(admm.model[:z],admm.model[:z_counter])    
+        println(@sprintf "%4i %4.2e" iter+=1 err)
+        save_output && push!(output,(err,time()-start))
     end
+    save_output && (admm.model.ext[:output]=output)
+    admm.opt[:optional](admm)
 end
 
 function difference(a,b)
@@ -149,7 +147,17 @@ end
 optimize!(sm::SubModel) = optimize!(sm.model)
 instantiate!(sm::SubModel) = instantiate!(sm.model)
 
-function ADMMModel(m::Model;rho=1.,opt...)
+function Optimizer(m::Model)
+
+    opt = default_option()
+    for (sym,val) in m.opt
+        opt[sym] = val
+    end
+
+    objs = get_terms(m.obj)
+    cons = get_entries_expr(m.con)
+    obj_sparsity = [sparsity(e) for e in objs]
+    con_sparsity = [sparsity(e) for e in cons]
 
     m[:z] = zeros(num_variables(m))
     m[:z_counter] = zeros(Int,num_variables(m))
@@ -158,14 +166,23 @@ function ADMMModel(m::Model;rho=1.,opt...)
 
     K = [k for k in keys(m[:Vs])]
     Threads.@threads for k in K
-        sms[k] = SubModel(m,m[:Vs][k],rho;opt...)
+        sms[k] = SubModel(m,opt[:subproblem_optimizer],m[:Vs][k],opt[:rho],
+                          objs,cons,obj_sparsity,con_sparsity;
+                          opt[:subproblem_option]...)
     end
 
     for k in K
         m[:z_counter][sms[k].z_orig.indices[1]] .+= 1
     end
     
-    ADMMModel(m,sms,rho)
+    Optimizer(m,sms,KKTErrorEvaluator(m),opt)
+end
+
+function __init__()
+    @require Ipopt="b6b21f68-93f8-5de0-b562-5493be1d77c9" @eval begin
+        import ..Ipopt
+        DEFAULT_SUBPROBLEM_OPTIMIZER = Ipopt.Optimizer
+    end
 end
 
 end # module
