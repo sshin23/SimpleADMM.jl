@@ -1,7 +1,8 @@
 module SimpleADMM
 
 import Printf: @sprintf
-import SimpleNL: Expression, Model, variable, parameter, constraint, objective, num_variables, num_constraints, optimize!, instantiate!, index, get_terms, get_entries_expr, sparsity, non_caching_eval, KKTErrorEvaluator
+import SimpleNL: Expression, Model, variable, parameter, constraint, objective, num_variables, num_constraints, optimize!, instantiate!, index,  non_caching_eval
+import SimpleNLUtils: get_terms, get_entries_expr, sparsity, KKTErrorEvaluator
 import Requires: @require
 
 default_subproblem_optimizer() = @isdefined(DEFAULT_SUBPROBLEM_OPTIMIZER) ? DEFAULT_SUBPROBLEM_OPTIMIZER : error("DEFAULT_SUBPROBLEM_OPTIMIZER is not defined. To use Ipopt as a default subproblem optimizer, do: using Ipopt")
@@ -106,6 +107,9 @@ function optimize!(admm::Optimizer)
 
     iter = 0
     while (err=admm.kkt_error_evaluator(admm.model.x,admm.model.l,admm.model.gl)) > admm.opt[:tol] && iter < admm.opt[:maxiter]
+        save_output && push!(output,(err,time()-start))
+        println(@sprintf "%4i %4.2e" iter+=1 err)
+
         Threads.@threads for sm in admm.submodels
             sm.z_sub .= sm.z_orig
             sm.l_sub .+= admm.opt[:rho] .* (sm.x_sub .- sm.z_sub)
@@ -121,9 +125,9 @@ function optimize!(admm::Optimizer)
             sm.z_orig .+= sm.x_sub + sm.l_sub ./ 2 ./ admm.opt[:rho]
         end
         primal_update!(admm.model[:z],admm.model[:z_counter])    
-        println(@sprintf "%4i %4.2e" iter+=1 err)
-        save_output && push!(output,(err,time()-start))
     end
+    save_output && push!(output,(err,time()-start))
+    println(@sprintf "%4i %4.2e" iter+=1 err)
     save_output && (admm.model.ext[:output]=output)
     admm.opt[:optional](admm)
 end

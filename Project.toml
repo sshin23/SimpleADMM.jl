@@ -6,9 +6,11 @@ version = "0.1.0"
 [deps]
 Requires = "ae029012-a4dd-5104-9daa-d747884805df"
 SimpleNL = "7bbef9ca-9061-49de-8b0e-60c2db5b3b29"
+SimpleNLUtils = "2d4e91ba-f49c-4cf8-8b04-70606b35ede9"
 Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
 
 [compat]
 SimpleNL = "0.1"
+SimpleNLUtils = "0.1"
 Requires = "1"
 julia = "1.6"
